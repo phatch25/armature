@@ -1,0 +1,975 @@
+namespace syntax.test
+
+import "./supporting_types.arm"
+
+#* =============================================================================
+   Armature Syntax Conformance Test
+   =============================================================================
+
+   This file exercises every valid syntax construct defined in syntax.md.
+   If the parser accepts this file without error, it conforms to the spec.
+
+   Version: 2.0
+*#
+
+# =============================================================================
+# 1. LEXICAL: Comments
+# =============================================================================
+
+# Line comment
+
+#* Block comment on single line *#
+
+#*
+   Block comment
+   spanning multiple
+   lines
+*#
+
+# =============================================================================
+# 2. LEXICAL: Literals
+# =============================================================================
+
+model Literals {
+    context "Tests all literal formats"
+
+    # String literals
+    field simple_string: string = "hello world"
+    field escaped_string: string = "line1\nline2\ttabbed\r\n\"quoted\""
+    field backslash_string: string = "path\\to\\file"
+    field triple_string: string = """This is a
+multi-line string that
+spans several lines"""
+
+    # Integer literals
+    field decimal_int: i32 = 42
+    field zero: i32 = 0
+    field hex_int: u32 = 0xFF
+    field hex_lower: u32 = 0xdeadbeef
+    field hex_upper: u32 = 0xDEADBEEF
+
+    # Float literals
+    field simple_float: f64 = 3.14159
+    field scientific: f64 = 6.02e23
+    field sci_negative: f64 = 1.6e-19
+    field sci_positive: f64 = 1.5E+3
+    field sci_upper: f64 = 2.99E8
+
+    # Boolean literals
+    field is_active: bool = true
+    field is_deleted: bool = false
+
+    # Special literals
+    field created_at: timestamp [default: now]
+    field deleted_at: timestamp? = none
+
+    # Enum variant as default value
+    field theme: ThemeName = ThemeName.Dark
+
+    # Map literal as default value
+    field options: map<string, i32> = { "retries": 3, "timeout": 30 }
+}
+
+# =============================================================================
+# 3. SYMBOL: Model
+# =============================================================================
+
+model User {
+    context "A registered user of the system"
+
+    field id: uuid
+    field email: string [unique, format: email]
+    field password_hash: bytes [sensitive]
+    field name: string?
+    field age: u8 [min: 0, max: 150]
+    field bio: string [length: 0..1000]
+    field role: string [values: ["admin", "user", "guest"]]
+    field score: f64 [derived, computed_by: CalculateScore]
+    field created_at: timestamp [readonly, default: now]
+    field updated_at: timestamp
+    field active: bool = true
+
+    relation posts: has_many<ref<Post>>
+    relation profile: has_one<ref<UserProfile>>
+
+    invariant email_lowercase "email must be stored lowercase"
+    invariant password_not_empty "password_hash must not be empty"
+}
+
+model Post {
+    context "A blog post"
+
+    field id: uuid
+    field title: string [length: 1..200]
+    field content: string
+    field published: bool = false
+
+    relation author: belongs_to<ref<User>>
+    relation comments: has_many<ref<Comment>>
+    relation tags: many_to_many<ref<Tag>>
+}
+
+model UserProfile {
+    field id: uuid
+    field avatar_url: string?
+    field location: string?
+
+    relation user: belongs_to<ref<User>>
+}
+
+model Comment {
+    field id: uuid
+    field content: string
+
+    relation post: belongs_to<ref<Post>>
+}
+
+model Tag {
+    field id: uuid
+    field name: string [unique]
+}
+
+# Model with clone
+model BaseEntity {
+    field id: uuid
+    field created_at: timestamp [readonly, default: now]
+    field updated_at: timestamp
+}
+
+model AuditableEntity clone BaseEntity {
+    field created_by: ref<User>
+    field updated_by: ref<User>?
+}
+
+# =============================================================================
+# 4. SYMBOL: Enum
+# =============================================================================
+
+enum Status {
+    context "Lifecycle status"
+
+    variant Pending
+    variant Active
+    variant Suspended
+    variant Deleted
+}
+
+enum HttpMethod {
+    variant GET
+    variant POST
+    variant PUT
+    variant PATCH
+    variant DELETE
+}
+
+# Enum with keyword as variant name
+enum TokenType {
+    variant model
+    variant field
+    variant string
+    variant true
+    variant false
+}
+
+# =============================================================================
+# 4b. Sum Types (Data-carrying Enum Variants)
+# =============================================================================
+
+# Sum type with reference types
+enum SymbolSpec {
+    context "Tagged union for different symbol kinds"
+    variant Model(ModelDef)
+    variant Enum(EnumDef)
+    variant Interface(InterfaceDef)
+    variant Operation(OperationDef)
+    variant Event(EventDef)
+}
+
+# Mixed sum type: some variants with data, some without
+enum ParseResult {
+    variant Success(AstNode)
+    variant Error(ParseError)
+    variant Empty
+}
+
+# Sum type with primitive types
+enum Value {
+    variant Int(i64)
+    variant Float(f64)
+    variant String(string)
+    variant Bool(bool)
+    variant Null
+}
+
+# Sum type with collection types
+enum CollectionValue {
+    variant Single(User)
+    variant Multiple(list<User>)
+    variant Indexed(map<string, User>)
+    variant Unique(set<uuid>)
+}
+
+# Sum type with optional inner type
+enum MaybeResult {
+    variant Some(User?)
+    variant None
+}
+
+# Sum type with inline struct
+enum Response {
+    variant Ok({ data: string, count: i32 })
+    variant Error({ code: i32, message: string })
+}
+
+# Sum type with ref<T>
+enum EntityRef {
+    variant UserRef(ref<User>)
+    variant OrgRef(ref<Organization>)
+}
+
+# Sum type with oneof
+enum TypeUnionVariant {
+    variant Union(oneof<User, Admin, Guest>)
+    variant Literal(oneof<"a", "b", "c">)
+}
+
+# =============================================================================
+# 5. SYMBOL: Interface
+# =============================================================================
+
+interface UserStore {
+    context "Persistent storage for user records"
+
+    # Inline method syntax
+    method find_by_id(id: uuid): User?
+    method find_by_email(email: string): User?
+    method insert(user: User): uuid
+    method update(user: User): void
+    method delete(id: uuid): bool
+    method count(): u64
+}
+
+interface Authenticator {
+    context "Authentication service contract"
+
+    # Block method syntax with errors
+    method authenticate {
+        input username: string
+        input password: string
+        output: Session?
+        error invalid_credentials "Username or password is incorrect"
+        error account_locked "Account has been locked"
+    }
+
+    method validate_token {
+        input token: string
+        output: User?
+        error token_expired "Token has expired"
+        error token_invalid "Token is malformed"
+    }
+}
+
+# Interface with keyword as method name
+interface KeywordMethods {
+    method model(): void
+    method field(input: string): string
+    method config(): Config?
+}
+
+# Interface with method-level context
+interface SpecTools {
+    context "MCP tool interface for querying spec state"
+
+    method query {
+        context "List symbols with optional filters and text search"
+        input kind: string?
+        input status: string?
+        output: list<User>
+    }
+
+    method task {
+        context "Get implementation task with resolved dependency context"
+        input name: string
+        output: User
+        error not_found "Symbol does not exist"
+        error not_ready "Symbol has unresolved dependencies"
+    }
+
+    # Inline methods don't have context (that's fine)
+    method progress(): u32
+}
+
+# =============================================================================
+# 6. SYMBOL: Operation
+# =============================================================================
+
+operation CreateUser {
+    context "Register a new user account"
+
+    input email: string
+    input password: string
+    input name: string?
+
+    output: User
+
+    error email_taken "A user with this email already exists"
+    error invalid_email "The email format is invalid"
+    error weak_password "Password does not meet strength requirements"
+
+    requires UserStore
+    requires PasswordHasher
+
+    effect creates User
+    effect emits UserCreated
+
+    precondition email_valid "email matches email format"
+    precondition password_not_empty "password is not empty"
+
+    postcondition user_exists "user can be retrieved by email"
+    postcondition password_hashed "stored password_hash is not plain text"
+}
+
+operation UpdateUser {
+    context "Update user profile"
+
+    input user_id: uuid
+    input name: string?
+    input bio: string?
+
+    output: User
+
+    error not_found "User does not exist"
+
+    requires UserStore
+
+    effect updates User
+}
+
+operation DeleteUser {
+    input user_id: uuid
+    output: bool
+
+    requires UserStore
+
+    effect deletes User
+    effect emits UserDeleted
+}
+
+operation AuthenticateUser {
+    input email: string
+    input password: string
+
+    output: Session
+
+    requires UserStore
+    requires PasswordHasher
+    requires SessionStore
+
+    effect creates Session
+    effect calls AuditLog
+}
+
+# Operation with default input values
+operation SearchUsers {
+    input query: string
+    input limit: u32 = 10
+    input offset: u32 = 0
+    input include_inactive: bool = false
+
+    output: list<User>
+
+    requires UserStore
+}
+
+# =============================================================================
+# 7. SYMBOL: Event
+# =============================================================================
+
+event UserCreated {
+    context "Emitted when a new user registers"
+
+    field user_id: uuid
+    field email: string
+    field created_at: timestamp
+
+    producer CreateUser
+}
+
+event UserDeleted {
+    field user_id: uuid
+    field deleted_at: timestamp
+
+    producer DeleteUser
+}
+
+event UserLoggedIn {
+    context "Emitted on successful authentication"
+
+    field user_id: uuid
+    field session_id: uuid
+    field ip_address: string?
+    field timestamp: timestamp
+}
+
+# Event without producer
+event SystemStarted {
+    field timestamp: timestamp
+    field version: string
+}
+
+# =============================================================================
+# 8. SYMBOL: Config
+# =============================================================================
+
+config AppSettings {
+    context "Runtime application configuration"
+
+    field max_upload_mb: u32 = 10
+    field session_timeout_mins: u32 = 30
+    field debug_mode: bool = false
+    field api_base_url: string = "https://api.example.com"
+    field allowed_origins: list<string> = { "http://localhost:3000" }
+}
+
+config DatabaseConfig {
+    field host: string = "localhost"
+    field port: u16 = 5432
+    field database: string
+    field username: string
+    field password: string [sensitive]
+    field max_connections: u32 = 10
+    field ssl_mode: string = "prefer"
+}
+
+# =============================================================================
+# 9. SYMBOL: Portal
+# =============================================================================
+
+portal CreateUserAPI {
+    context "HTTP endpoint for creating new user accounts"
+    direction: input
+    transport: http
+    method: POST
+    path: "/users"
+    format: json
+    handler: CreateUser
+}
+
+portal GetUserAPI {
+    direction: input
+    transport: http
+    method: GET
+    path: "/users/{id}"
+    format: json
+    handler: GetUser
+}
+
+portal UpdateUserAPI {
+    direction: input
+    transport: http
+    method: PUT
+    path: "/users/{id}"
+    format: json
+    handler: UpdateUser
+}
+
+portal DeleteUserAPI {
+    direction: input
+    transport: http
+    method: DELETE
+    path: "/users/{id}"
+    handler: DeleteUser
+}
+
+# Portal with clone
+portal GetPostAPI clone GetUserAPI {
+    path: "/posts/{id}"
+    handler: GetPost
+}
+
+# Non-HTTP portals
+portal SensorData {
+    direction: input
+    transport: uart
+    baud: 115200
+    format: binary
+    handler: ProcessSensorData
+}
+
+portal MotorControl {
+    direction: output
+    transport: can
+    message_id: 0x18EEFF00
+    format: binary
+    data_source: ComputeTrajectory
+}
+
+portal TelemetryStream {
+    direction: output
+    transport: mqtt
+    topic: "device/telemetry"
+    qos: 1
+    format: json
+    data_source: CollectTelemetry
+}
+
+portal QueryTool {
+    context "MCP tool for querying symbols in the specification"
+    direction: input
+    transport: mcp
+    tool_name: "query"
+    handler: QuerySymbols
+}
+
+# =============================================================================
+# 10. SYMBOL: Surface
+# =============================================================================
+
+surface TaskListScreen {
+    context "Shows the user's task list"
+
+    parent MainScreen
+
+    display tasks: list<Task>
+    display progress: TaskProgress
+
+    state loading: bool = false
+    state selected: Task?
+    state filter: string = "all"
+
+    interaction swipe_complete "Swipe right to mark complete"
+    interaction tap_details "Tap task for details"
+    interaction pull_refresh "Pull down to refresh"
+
+    on complete { task_id: uuid }
+    on refresh { }
+    on select { task_id: uuid }
+}
+
+surface LoginScreen {
+    context "User login form"
+
+    display error_message: string?
+
+    state email: string = ""
+    state password: string = ""
+    state submitting: bool = false
+
+    on submit { email: string, password: string }
+    on forgot_password { email: string }
+}
+
+# CLI surface
+surface ListCommand {
+    context "List available items"
+
+    command "list"
+
+    argument filter: string?
+    argument format: string?
+
+    flag verbose: bool
+    flag help: bool
+    flag all: bool
+
+    output format: table
+
+    help "List all available items with optional filtering"
+}
+
+surface CompileCommand {
+    command "compile"
+
+    argument input: string
+    argument output: string?
+
+    flag verbose: bool
+    flag watch: bool
+    flag strict: bool
+
+    help "Compile an Armature specification to database"
+}
+
+# Embedded surface with mapping
+surface StatusLED {
+    context "LED status indicator"
+
+    display state: Status
+
+    output pin: gpio_2
+    output pattern: led_pattern
+
+    mapping {
+        idle: off
+        running: blink_slow
+        error: blink_fast
+        complete: solid
+    }
+}
+
+# Surface with property
+surface ConfigurableWidget {
+    context "Widget with configurable properties"
+
+    property layout: vertical
+    property theme: dark
+    property size: large
+
+    display content: string
+}
+
+# Surface with accessibility
+surface AccessibleButton {
+    context "Button with accessibility metadata"
+
+    display label: string
+
+    accessibility {
+        label "Submit form button"
+        hint "Tap to submit the form"
+        role: button
+    }
+}
+
+# =============================================================================
+# 11. TYPE EXPRESSIONS
+# =============================================================================
+
+model TypeExpressions {
+    context "Tests all type expression forms"
+
+    # Primitives
+    field f_uuid: uuid
+    field f_ulid: ulid
+    field f_string: string
+    field f_bytes: bytes
+    field f_char: char
+    field f_bool: bool
+    field f_u8: u8
+    field f_u16: u16
+    field f_u32: u32
+    field f_u64: u64
+    field f_u128: u128
+    field f_i8: i8
+    field f_i16: i16
+    field f_i32: i32
+    field f_i64: i64
+    field f_i128: i128
+    field f_f32: f32
+    field f_f64: f64
+    field f_timestamp: timestamp
+    field f_duration: duration
+    field f_size: size
+    field f_ptr: ptr<u8>
+    field f_any: any
+    field f_decimal: decimal(10, 2)
+
+    # Optional with ? suffix
+    field opt_string: string?
+    field opt_user: User?
+
+    # Optional with explicit wrapper
+    field opt_explicit: optional<string>
+
+    # Collections
+    field list_strings: list<string>
+    field set_ids: set<uuid>
+    field map_scores: map<string, f64>
+    field nested_list: list<list<string>>
+    field nested_map: map<string, list<User>>
+
+    # References
+    field user_ref: ref<User>
+    field qualified_ref: ref<syntax.test.User>
+
+    # Oneof with types
+    field result: oneof<Success, Failure>
+    field response: oneof<User, Error, none>
+
+    # Oneof with literals
+    field status: oneof<"pending", "active", "done">
+    field direction: oneof<"north", "south", "east", "west">
+
+    # Inline struct
+    field point: { x: f64, y: f64 }
+    field range: { start: i64, end: i64, inclusive: bool }
+}
+
+# =============================================================================
+# 12. CONSTRAINTS
+# =============================================================================
+
+model ConstraintExamples {
+    context "Tests all constraint forms"
+
+    # Validation constraints
+    field unique_field: string [unique]
+    field email_field: string [format: email]
+    field url_field: string [format: url]
+    field uuid_field: string [format: uuid]
+    field phone_field: string [format: e164]
+    field pattern_field: string [pattern: "^[a-z]+$"]
+    field values_field: string [values: ["a", "b", "c"]]
+    field min_field: i32 [min: 0]
+    field max_field: i32 [max: 100]
+    field range_field: i32 [min: 0, max: 100]
+    field length_field: string [length: 1..100]
+    field ref_field: uuid [references: User.id]
+
+    # Metadata constraints
+    field sensitive_field: string [sensitive]
+    field immutable_field: uuid [immutable]
+    field readonly_field: timestamp [readonly]
+    field derived_field: f64 [derived]
+    field indexed_field: string [indexed]
+    field primary_field: uuid [primary]
+
+    # Combined constraints
+    field combined: string [unique, indexed, length: 1..50]
+    field full: string [unique, format: email, indexed, sensitive]
+
+    # Constraints with default value (spec order: [constraints] = default)
+    field with_default: string [unique] = "default_value"
+    field constrained_int: i32 [min: 0, max: 100] = 50
+
+    # Trailing comma (optional)
+    field trailing: string [unique, indexed,]
+}
+
+# =============================================================================
+# 13. KEYWORDS AS NAMES
+# =============================================================================
+
+# Model named with keyword
+model model {
+    field field: string
+    field model: model?
+    field config: string
+    field event: string
+    field interface: string
+}
+
+model config {
+    field model: string
+    field operation: string
+}
+
+# Fields with keyword names
+model KeywordFields {
+    field model: string
+    field enum: string
+    field interface: string
+    field operation: string
+    field event: string
+    field config: string
+    field portal: string
+    field surface: string
+    field field: string
+    field variant: string
+    field method: string
+    field input: string
+    field output: string
+    field error: string
+    field requires: string
+    field effect: string
+    field true: bool
+    field false: bool
+    field list: string
+    field map: string
+    field ref: string
+    field on: string
+}
+
+# Enum with keyword variants
+enum Keywords {
+    variant model
+    variant enum
+    variant interface
+    variant operation
+    variant event
+    variant config
+    variant portal
+    variant surface
+    variant true
+    variant false
+    variant none
+    variant now
+}
+
+# Interface with keyword method names
+interface KeywordInterface {
+    method model(): void
+    method field(): void
+    method config(): void
+    method event(): void
+}
+
+# Operation with keyword input names
+operation KeywordOperation {
+    input model: string
+    input field: string
+    input config: string
+    input event: string
+    output: string
+}
+
+# =============================================================================
+# 14. EDGE CASES
+# =============================================================================
+
+# Empty model (just context)
+model EmptyModel {
+    context "A model with no fields"
+}
+
+# Minimal enum
+enum MinimalEnum {
+    variant Only
+}
+
+# Operation with no clauses
+operation NoOpOperation {
+}
+
+# Event with no fields
+event EmptyEvent {
+    producer NoOpOperation
+}
+
+# Config with no fields
+config EmptyConfig {
+    context "Empty configuration"
+}
+
+# Portal with minimal properties
+portal MinimalPortal {
+    direction: input
+    transport: custom
+}
+
+# Surface with minimal content
+surface MinimalSurface {
+    context "Minimal surface definition"
+}
+
+# Deeply nested types
+model DeepNesting {
+    field deep: list<map<string, list<set<uuid>>>>
+    field optional_deep: list<map<string, User?>>?
+}
+
+# =============================================================================
+# 15. WHITESPACE VARIATIONS
+# =============================================================================
+
+model WhitespaceTest{field compact:string}
+
+model SpacedOut {
+
+    context    "Extra spacing"
+
+    field    spaced_field    :    string    =    "value"
+
+    field    with_constraints    :    string    [    unique    ,    indexed    ]
+
+}
+
+# =============================================================================
+# 16. Supporting types for references
+# =============================================================================
+
+enum ThemeName {
+    variant Light
+    variant Dark
+    variant System
+}
+
+model Session {
+    field id: uuid
+    field user_id: ref<User>
+    field token: string
+    field expires_at: timestamp
+}
+
+model Task {
+    field id: uuid
+    field title: string
+    field completed: bool
+}
+
+model TaskProgress {
+    field total: u32
+    field completed: u32
+}
+
+model Success {
+    field data: any
+}
+
+model Failure {
+    field code: string
+    field message: string
+}
+
+model Error {
+    field code: string
+    field message: string
+}
+
+model Config {
+    field key: string
+    field value: string
+}
+
+model MainScreen {
+    field title: string
+}
+
+interface PasswordHasher {
+    method hash(password: string): bytes
+    method verify(password: string, hash: bytes): bool
+}
+
+interface SessionStore {
+    method create(user_id: uuid): Session
+    method find(token: string): Session?
+    method delete(token: string): bool
+}
+
+interface AuditLog {
+    method log(action: string, user_id: uuid): void
+}
+
+operation GetUser {
+    input id: uuid
+    output: User?
+    requires UserStore
+}
+
+operation GetPost {
+    input id: uuid
+    output: Post?
+}
+
+operation QuerySymbols {
+    input filter: string?
+    output: list<string>
+}
+
+operation ProcessSensorData {
+    input data: bytes
+    output: void
+}
+
+operation ComputeTrajectory {
+    output: bytes
+}
+
+operation CollectTelemetry {
+    output: map<string, any>
+}
+
+operation CalculateScore {
+    input user_id: uuid
+    output: f64
+}

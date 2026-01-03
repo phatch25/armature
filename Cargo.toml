@@ -1,0 +1,33 @@
+[package]
+name = "armature"
+version = "0.1.0"
+edition = "2021"
+description = "Armature Schema Language compiler - architecture specification for AI agents"
+license = "MIT"
+
+[dependencies]
+# CLI
+clap = { version = "4.4", features = ["derive"] }
+
+# Error handling
+thiserror = "2.0"
+
+# Database (for later phases)
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# JSON serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Compile-time keyword map
+phf = { version = "0.11", features = ["macros"] }
+
+# Time
+chrono = "0.4"
+
+[dev-dependencies]
+tempfile = "3.0"
+
+[[bin]]
+name = "armature"
+path = "src/main.rs"
