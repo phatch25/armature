@@ -74,13 +74,6 @@ impl Parser {
         self.current().location
     }
 
-    /// Look ahead by offset tokens.
-    #[allow(dead_code)]
-    fn peek(&self, offset: usize) -> &Token {
-        let pos = self.pos + offset;
-        self.tokens.get(pos).unwrap_or(&self.tokens[self.tokens.len() - 1])
-    }
-
     /// Consume and return current token.
     fn advance(&mut self) -> &Token {
         let prev_pos = self.pos;
@@ -107,11 +100,15 @@ impl Parser {
         types.contains(&self.current_type())
     }
 
-    /// Skip any newline tokens.
     fn skip_newlines(&mut self) {
         while self.current_type() == TokenType::Newline {
             self.advance();
         }
+    }
+
+    fn should_continue_block(&mut self) -> bool {
+        self.skip_newlines();
+        self.current_type() != TokenType::RBrace
     }
 
     /// Skip newlines and doc comments, returning the last doc comment seen.
@@ -192,12 +189,20 @@ impl Parser {
         Ok(ImportDecl { location: loc, path })
     }
 
-    /// Parse a dotted name like `app.auth.User`.
     fn parse_dotted_name(&mut self) -> Result<String, ParseError> {
         let mut parts = vec![self.expect_identifier()?];
         while self.current_type() == TokenType::Dot {
             self.advance();
             parts.push(self.expect_identifier()?);
+        }
+        Ok(parts.join("."))
+    }
+
+    fn parse_dotted_identifier(&mut self) -> Result<String, ParseError> {
+        let mut parts = vec![self.expect_name()?];
+        while self.current_type() == TokenType::Dot {
+            self.advance();
+            parts.push(self.expect_name()?);
         }
         Ok(parts.join("."))
     }
@@ -526,12 +531,7 @@ impl Parser {
         let mut relations = Vec::new();
         let mut invariants = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -624,7 +624,7 @@ impl Parser {
         let loc = self.location();
 
         // Constraint name can be an identifier or a keyword like "format", "unique", etc.
-        let name = self.parse_constraint_name()?;
+        let name = self.expect_constraint_name()?;
 
         let value = if self.current_type() == TokenType::Colon {
             self.advance();
@@ -640,78 +640,29 @@ impl Parser {
         })
     }
 
-    /// Parse constraint name (can be identifier or constraint keyword).
-    fn parse_constraint_name(&mut self) -> Result<String, ParseError> {
+    fn expect_constraint_name(&mut self) -> Result<String, ParseError> {
+        if self.current_type() == TokenType::Identifier {
+            return self.expect_name();
+        }
+
         let name = match self.current_type() {
-            TokenType::Identifier => self.expect_name()?,
-            TokenType::Unique => {
-                self.advance();
-                "unique".to_string()
-            }
-            TokenType::FormatKw | TokenType::Format => {
-                self.advance();
-                "format".to_string()
-            }
-            TokenType::Pattern => {
-                self.advance();
-                "pattern".to_string()
-            }
-            TokenType::Min => {
-                self.advance();
-                "min".to_string()
-            }
-            TokenType::Max => {
-                self.advance();
-                "max".to_string()
-            }
-            TokenType::Length => {
-                self.advance();
-                "length".to_string()
-            }
-            TokenType::Sensitive => {
-                self.advance();
-                "sensitive".to_string()
-            }
-            TokenType::Immutable => {
-                self.advance();
-                "immutable".to_string()
-            }
-            TokenType::Readonly => {
-                self.advance();
-                "readonly".to_string()
-            }
-            TokenType::Derived => {
-                self.advance();
-                "derived".to_string()
-            }
-            TokenType::Indexed => {
-                self.advance();
-                "indexed".to_string()
-            }
-            TokenType::Default => {
-                self.advance();
-                "default".to_string()
-            }
-            TokenType::Primary => {
-                self.advance();
-                "primary".to_string()
-            }
-            TokenType::References => {
-                self.advance();
-                "references".to_string()
-            }
-            TokenType::Values => {
-                self.advance();
-                "values".to_string()
-            }
-            TokenType::ComputedBy => {
-                self.advance();
-                "computed_by".to_string()
-            }
-            TokenType::Custom => {
-                self.advance();
-                "custom".to_string()
-            }
+            TokenType::Unique => "unique",
+            TokenType::FormatKw | TokenType::Format => "format",
+            TokenType::Pattern => "pattern",
+            TokenType::Min => "min",
+            TokenType::Max => "max",
+            TokenType::Length => "length",
+            TokenType::Sensitive => "sensitive",
+            TokenType::Immutable => "immutable",
+            TokenType::Readonly => "readonly",
+            TokenType::Derived => "derived",
+            TokenType::Indexed => "indexed",
+            TokenType::Default => "default",
+            TokenType::Primary => "primary",
+            TokenType::References => "references",
+            TokenType::Values => "values",
+            TokenType::ComputedBy => "computed_by",
+            TokenType::Custom => "custom",
             _ => {
                 return Err(ParseError::unexpected(
                     self.location(),
@@ -720,7 +671,9 @@ impl Parser {
                 ))
             }
         };
-        Ok(name)
+
+        self.advance();
+        Ok(name.to_string())
     }
 
     /// Parse constraint value.
@@ -746,23 +699,12 @@ impl Parser {
             }
             TokenType::String => Ok(ConstraintValue::String(self.expect_string()?)),
             TokenType::Identifier => {
-                // Handle dotted identifier like User.id
-                let mut parts = vec![self.expect_name()?];
-                while self.current_type() == TokenType::Dot {
-                    self.advance();
-                    parts.push(self.expect_name()?);
-                }
-                Ok(ConstraintValue::Identifier(parts.join(".")))
+                let name = self.parse_dotted_identifier()?;
+                Ok(ConstraintValue::Identifier(name))
             }
-            // Allow keywords as constraint values
             _ if self.is_keyword_that_can_be_name() => {
-                // Handle dotted identifier where first part is a keyword
-                let mut parts = vec![self.expect_name()?];
-                while self.current_type() == TokenType::Dot {
-                    self.advance();
-                    parts.push(self.expect_name()?);
-                }
-                Ok(ConstraintValue::Identifier(parts.join(".")))
+                let name = self.parse_dotted_identifier()?;
+                Ok(ConstraintValue::Identifier(name))
             }
             TokenType::LBracket => {
                 // List of strings for "values" constraint
@@ -777,12 +719,6 @@ impl Parser {
                 self.expect(TokenType::RBracket)?;
                 Ok(ConstraintValue::List(list))
             }
-            // Allow keywords as identifiers in constraint values (e.g., format: email)
-            _ if self.is_format_keyword() => {
-                let name = self.format_keyword_name();
-                self.advance();
-                Ok(ConstraintValue::Identifier(name))
-            }
             _ => Err(ParseError::unexpected(
                 self.location(),
                 "constraint value",
@@ -791,24 +727,6 @@ impl Parser {
         }
     }
 
-    /// Check if current token is a format keyword (email, url, uuid, etc.)
-    fn is_format_keyword(&self) -> bool {
-        matches!(
-            self.current_type(),
-            TokenType::Uuid | TokenType::Now
-        )
-    }
-
-    /// Get the name for a format keyword.
-    fn format_keyword_name(&self) -> String {
-        match self.current_type() {
-            TokenType::Uuid => "uuid".to_string(),
-            TokenType::Now => "now".to_string(),
-            _ => "unknown".to_string(),
-        }
-    }
-
-    /// Expect an integer and return its value.
     fn expect_integer(&mut self) -> Result<i64, ParseError> {
         if self.current_type() == TokenType::Integer {
             if let TokenValue::Integer(i) = self.current().value {
@@ -886,12 +804,7 @@ impl Parser {
         let mut context = None;
         let mut variants = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -960,12 +873,7 @@ impl Parser {
         let mut context = None;
         let mut methods = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1051,12 +959,7 @@ impl Parser {
         let mut return_type = None;
         let mut errors = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1125,12 +1028,7 @@ impl Parser {
         let mut preconditions = Vec::new();
         let mut postconditions = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1258,12 +1156,7 @@ impl Parser {
         let mut fields = Vec::new();
         let mut producer = None;
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1313,12 +1206,7 @@ impl Parser {
         let mut context = None;
         let mut fields = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1372,12 +1260,7 @@ impl Parser {
         let mut context = None;
         let mut properties = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1499,12 +1382,7 @@ impl Parser {
         let mut accessibility = None;
         let mut mapping = None;
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
-
+        while self.should_continue_block() {
             match self.current_type() {
                 TokenType::Context => {
                     self.advance();
@@ -1656,11 +1534,7 @@ impl Parser {
         self.skip_newlines();
 
         let mut fields = Vec::new();
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
             // Fields in surface events don't have 'field' keyword
             let field_loc = self.location();
             let field_name = self.expect_name()?;
@@ -1745,11 +1619,7 @@ impl Parser {
         let mut hint = None;
         let mut role = None;
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
 
             // Accessibility properties are "label"/"hint" (strings) or "role:" (identifier)
             let prop_name = self.expect_name()?;
@@ -1793,11 +1663,7 @@ impl Parser {
 
         let mut entries = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
 
             let entry_loc = self.location();
             let key = self.expect_name()?;
@@ -2018,25 +1884,9 @@ impl Parser {
             });
         }
 
-        // Keywords can also be used as type names (e.g., `model model { field x: model }`)
         if self.is_keyword_that_can_be_name() {
-            let first = self.expect_name()?;
-            // Handle dotted names like module.Type
-            if self.current_type() == TokenType::Dot {
-                let mut parts = vec![first];
-                while self.current_type() == TokenType::Dot {
-                    self.advance();
-                    parts.push(self.expect_name()?);
-                }
-                return Ok(TypeExpr::Primitive {
-                    location: loc,
-                    name: parts.join("."),
-                });
-            }
-            return Ok(TypeExpr::Primitive {
-                location: loc,
-                name: first,
-            });
+            let name = self.parse_dotted_identifier()?;
+            return Ok(TypeExpr::Primitive { location: loc, name });
         }
 
         Err(ParseError::unexpected(
@@ -2174,8 +2024,8 @@ impl Parser {
 }
 
 /// Parse Armature source code into an AST.
-pub fn parse(source: &str, filename: &str) -> Result<File, ParseError> {
-    let tokens = tokenize(source, filename)?;
+pub fn parse(source: &str, _filename: &str) -> Result<File, ParseError> {
+    let tokens = tokenize(source)?;
     let mut parser = Parser::new(tokens);
     parser.parse_file()
 }
@@ -2216,8 +2066,8 @@ pub fn parse_file(source: &str, filename: &str) -> Result<ParsedFile, ParseError
 }
 
 /// Parse .ac project configuration file.
-pub fn parse_ac(source: &str, filename: &str) -> Result<AcFile, ParseError> {
-    let tokens = tokenize(source, filename)?;
+pub fn parse_ac(source: &str, _filename: &str) -> Result<AcFile, ParseError> {
+    let tokens = tokenize(source)?;
     let mut parser = Parser::new(tokens);
     parser.parse_ac_file()
 }
@@ -2305,11 +2155,7 @@ impl Parser {
 
         let mut fields = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
 
             let field = self.parse_project_field()?;
             fields.push(field);
@@ -2335,11 +2181,7 @@ impl Parser {
             self.advance();
             self.skip_newlines();
             let mut nested_fields = Vec::new();
-            while self.current_type() != TokenType::RBrace {
-                self.skip_newlines();
-                if self.current_type() == TokenType::RBrace {
-                    break;
-                }
+            while self.should_continue_block() {
                 nested_fields.push(self.parse_project_field()?);
                 self.skip_newlines();
             }
@@ -2367,11 +2209,7 @@ impl Parser {
 
         let mut fields = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
 
             let field = self.parse_platform_field()?;
             fields.push(field);
@@ -2398,11 +2236,7 @@ impl Parser {
             self.advance();
             self.skip_newlines();
             let mut nested_fields = Vec::new();
-            while self.current_type() != TokenType::RBrace {
-                self.skip_newlines();
-                if self.current_type() == TokenType::RBrace {
-                    break;
-                }
+            while self.should_continue_block() {
                 nested_fields.push(self.parse_platform_field()?);
                 self.skip_newlines();
             }
@@ -2498,11 +2332,7 @@ impl Parser {
 
         let mut fields = Vec::new();
 
-        while self.current_type() != TokenType::RBrace {
-            self.skip_newlines();
-            if self.current_type() == TokenType::RBrace {
-                break;
-            }
+        while self.should_continue_block() {
 
             let field_loc = self.location();
             let name = self.expect_name()?;

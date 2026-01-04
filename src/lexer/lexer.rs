@@ -7,6 +7,27 @@ use thiserror::Error;
 use super::keywords;
 use super::token::{SourceLocation, Token, TokenType, TokenValue};
 
+/// Map single-character punctuation to token types.
+fn punctuation_token(ch: char) -> Option<TokenType> {
+    match ch {
+        '{' => Some(TokenType::LBrace),
+        '}' => Some(TokenType::RBrace),
+        '[' => Some(TokenType::LBracket),
+        ']' => Some(TokenType::RBracket),
+        '(' => Some(TokenType::LParen),
+        ')' => Some(TokenType::RParen),
+        '<' => Some(TokenType::LAngle),
+        '>' => Some(TokenType::RAngle),
+        ':' => Some(TokenType::Colon),
+        ',' => Some(TokenType::Comma),
+        '.' => Some(TokenType::Dot),
+        '?' => Some(TokenType::Question),
+        '=' => Some(TokenType::Equals),
+        '|' => Some(TokenType::Pipe),
+        _ => None,
+    }
+}
+
 /// Errors that can occur during lexical analysis.
 #[derive(Debug, Error, Clone, PartialEq)]
 pub enum LexerError {
@@ -34,8 +55,6 @@ pub enum LexerError {
 
 /// Tokenizer for Armature source files.
 pub struct Lexer<'a> {
-    #[allow(dead_code)]
-    source: &'a str, // Kept for potential future use in error context display
     chars: Peekable<CharIndices<'a>>,
     line: u32,
     column: u32,
@@ -46,7 +65,6 @@ impl<'a> Lexer<'a> {
     /// Create a new lexer for the given source code.
     pub fn new(source: &'a str) -> Self {
         Self {
-            source,
             chars: source.char_indices().peekable(),
             line: 1,
             column: 1,
@@ -85,6 +103,14 @@ impl<'a> Lexer<'a> {
         iter.peek().map(|(_, c)| *c)
     }
 
+    /// Check if the next three characters form a triple-quote (""").
+    fn is_triple_quote(&self) -> bool {
+        let mut iter = self.chars.clone();
+        iter.next().map(|(_, c)| c) == Some('"')
+            && iter.next().map(|(_, c)| c) == Some('"')
+            && iter.next().map(|(_, c)| c) == Some('"')
+    }
+
     /// Consume and return the current character.
     fn advance(&mut self) -> Option<char> {
         if let Some((_, ch)) = self.chars.next() {
@@ -97,6 +123,35 @@ impl<'a> Lexer<'a> {
             Some(ch)
         } else {
             None
+        }
+    }
+
+    /// Process an escape sequence after a backslash. Returns the escaped character.
+    fn process_escape(&mut self, start_loc: SourceLocation) -> Result<char, LexerError> {
+        let escape_loc = self.location();
+        match self.peek() {
+            None => Err(LexerError::UnterminatedString {
+                line: start_loc.line,
+                column: start_loc.column,
+            }),
+            Some(ch) => {
+                let escaped = match ch {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '"' => '"',
+                    '\\' => '\\',
+                    _ => {
+                        return Err(LexerError::InvalidEscape {
+                            line: escape_loc.line,
+                            column: escape_loc.column,
+                            ch,
+                        })
+                    }
+                };
+                self.advance();
+                Ok(escaped)
+            }
         }
     }
 
@@ -134,8 +189,8 @@ impl<'a> Lexer<'a> {
                     });
                 }
                 Some('*') if self.peek_next() == Some('#') => {
-                    self.advance(); // *
-                    self.advance(); // #
+                    self.advance();
+                    self.advance();
                     let trimmed = content.trim().to_string();
                     return Ok(Token::new(
                         TokenType::DocComment,
@@ -189,42 +244,8 @@ impl<'a> Lexer<'a> {
                 }
                 Some('\\') => {
                     self.advance();
-                    let escape_loc = self.location();
-                    match self.peek() {
-                        None => {
-                            return Err(LexerError::UnterminatedString {
-                                line: start_loc.line,
-                                column: start_loc.column,
-                            });
-                        }
-                        Some('n') => {
-                            chars.push('\n');
-                            self.advance();
-                        }
-                        Some('t') => {
-                            chars.push('\t');
-                            self.advance();
-                        }
-                        Some('r') => {
-                            chars.push('\r');
-                            self.advance();
-                        }
-                        Some('"') => {
-                            chars.push('"');
-                            self.advance();
-                        }
-                        Some('\\') => {
-                            chars.push('\\');
-                            self.advance();
-                        }
-                        Some(ch) => {
-                            return Err(LexerError::InvalidEscape {
-                                line: escape_loc.line,
-                                column: escape_loc.column,
-                                ch,
-                            });
-                        }
-                    }
+                    let ch = self.process_escape(start_loc)?;
+                    chars.push(ch);
                 }
                 Some(ch) => {
                     chars.push(ch);
@@ -246,22 +267,17 @@ impl<'a> Lexer<'a> {
                         column: start_loc.column,
                     });
                 }
-                Some('"') if self.peek_next() == Some('"') => {
-                    // Check for third quote
-                    let mut iter = self.chars.clone();
-                    iter.next(); // First "
-                    iter.next(); // Second "
-                    if iter.peek().map(|(_, c)| *c) == Some('"') {
-                        self.advance(); // First "
-                        self.advance(); // Second "
-                        self.advance(); // Third "
-                        return Ok(Token::new(
-                            TokenType::String,
-                            TokenValue::String(chars),
-                            start_loc,
-                        ));
-                    }
-                    // Not a closing triple-quote, just regular content
+                Some('"') if self.is_triple_quote() => {
+                    self.advance();
+                    self.advance();
+                    self.advance();
+                    return Ok(Token::new(
+                        TokenType::String,
+                        TokenValue::String(chars),
+                        start_loc,
+                    ));
+                }
+                Some('"') => {
                     chars.push('"');
                     self.advance();
                 }
@@ -295,41 +311,35 @@ impl<'a> Lexer<'a> {
         }
 
         // Check for hex literal: 0x or 0X
-        if chars.ends_with('0') || (is_negative && chars == "-0") {
-            if let Some(x) = self.peek() {
-                if x == 'x' || x == 'X' {
-                    // This is a hex literal
-                    self.advance(); // consume 'x' or 'X'
+        if (chars == "0" || chars == "-0") && matches!(self.peek(), Some('x' | 'X')) {
+            self.advance();
 
-                    let mut hex_chars = String::new();
-                    while let Some(ch) = self.peek() {
-                        if ch.is_ascii_hexdigit() {
-                            hex_chars.push(ch);
-                            self.advance();
-                        } else {
-                            break;
-                        }
-                    }
-
-                    if hex_chars.is_empty() {
-                        return Err(LexerError::UnexpectedCharacter {
-                            line: start_loc.line,
-                            column: start_loc.column,
-                            ch: self.peek().unwrap_or('?'),
-                        });
-                    }
-
-                    // Parse hex value
-                    let value = i64::from_str_radix(&hex_chars, 16).unwrap_or(0);
-                    let final_value = if is_negative { -value } else { value };
-
-                    return Ok(Token::new(
-                        TokenType::Integer,
-                        TokenValue::Integer(final_value),
-                        start_loc,
-                    ));
+            let mut hex_chars = String::new();
+            while let Some(ch) = self.peek() {
+                if ch.is_ascii_hexdigit() {
+                    hex_chars.push(ch);
+                    self.advance();
+                } else {
+                    break;
                 }
             }
+
+            if hex_chars.is_empty() {
+                return Err(LexerError::UnexpectedCharacter {
+                    line: start_loc.line,
+                    column: start_loc.column,
+                    ch: self.peek().unwrap_or('x'),
+                });
+            }
+
+            let value = i64::from_str_radix(&hex_chars, 16).expect("validated hex string");
+            let final_value = if is_negative { -value } else { value };
+
+            return Ok(Token::new(
+                TokenType::Integer,
+                TokenValue::Integer(final_value),
+                start_loc,
+            ));
         }
 
         // Continue reading decimal digits for integer part
@@ -393,7 +403,7 @@ impl<'a> Lexer<'a> {
                 }
 
                 // Scientific notation is always a decimal
-                let value: f64 = chars.parse().unwrap();
+                let value: f64 = chars.parse().expect("validated scientific notation");
                 return Ok(Token::new(
                     TokenType::Decimal,
                     TokenValue::Decimal(value),
@@ -403,14 +413,14 @@ impl<'a> Lexer<'a> {
         }
 
         if has_decimal {
-            let value: f64 = chars.parse().unwrap();
+            let value: f64 = chars.parse().expect("validated decimal literal");
             Ok(Token::new(
                 TokenType::Decimal,
                 TokenValue::Decimal(value),
                 start_loc,
             ))
         } else {
-            let value: i64 = chars.parse().unwrap();
+            let value: i64 = chars.parse().expect("validated integer literal");
             Ok(Token::new(
                 TokenType::Integer,
                 TokenValue::Integer(value),
@@ -499,71 +509,18 @@ impl<'a> Lexer<'a> {
                     return Ok(Token::simple(TokenType::DotDot, loc));
                 }
 
-                // Single-character punctuation
-                Some('{') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::LBrace, loc));
-                }
-                Some('}') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::RBrace, loc));
-                }
-                Some('[') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::LBracket, loc));
-                }
-                Some(']') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::RBracket, loc));
-                }
-                Some('(') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::LParen, loc));
-                }
-                Some(')') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::RParen, loc));
-                }
-                Some('<') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::LAngle, loc));
-                }
-                Some('>') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::RAngle, loc));
-                }
-                Some(':') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Colon, loc));
-                }
-                Some(',') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Comma, loc));
-                }
-                Some('.') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Dot, loc));
-                }
-                Some('?') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Question, loc));
-                }
-                Some('=') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Equals, loc));
-                }
-                Some('|') => {
-                    self.advance();
-                    return Ok(Token::simple(TokenType::Pipe, loc));
-                }
-
-                // Unknown character
+                // Single-character punctuation or unknown character
                 Some(ch) => {
+                    if let Some(tt) = punctuation_token(ch) {
+                        self.advance();
+                        return Ok(Token::simple(tt, loc));
+                    }
+
                     return Err(LexerError::UnexpectedCharacter {
                         line: loc.line,
                         column: loc.column,
                         ch,
-                    })
+                    });
                 }
             }
         }
@@ -571,7 +528,7 @@ impl<'a> Lexer<'a> {
 }
 
 /// Convenience function to tokenize source code.
-pub fn tokenize(source: &str, _filename: &str) -> Result<Vec<Token>, LexerError> {
+pub fn tokenize(source: &str) -> Result<Vec<Token>, LexerError> {
     Lexer::new(source).tokenize()
 }
 
@@ -581,14 +538,14 @@ mod tests {
 
     #[test]
     fn test_empty_source() {
-        let tokens = tokenize("", "<test>").unwrap();
+        let tokens = tokenize("").unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].token_type, TokenType::Eof);
     }
 
     #[test]
     fn test_simple_identifier() {
-        let tokens = tokenize("hello", "<test>").unwrap();
+        let tokens = tokenize("hello").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].token_type, TokenType::Identifier);
         assert_eq!(tokens[0].value, TokenValue::String("hello".to_string()));
@@ -596,28 +553,28 @@ mod tests {
 
     #[test]
     fn test_keyword() {
-        let tokens = tokenize("model", "<test>").unwrap();
+        let tokens = tokenize("model").unwrap();
         assert_eq!(tokens.len(), 2);
         assert_eq!(tokens[0].token_type, TokenType::Model);
     }
 
     #[test]
     fn test_integer() {
-        let tokens = tokenize("42", "<test>").unwrap();
+        let tokens = tokenize("42").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(42));
     }
 
     #[test]
     fn test_negative_integer() {
-        let tokens = tokenize("-17", "<test>").unwrap();
+        let tokens = tokenize("-17").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(-17));
     }
 
     #[test]
     fn test_decimal() {
-        let tokens = tokenize("3.14", "<test>").unwrap();
+        let tokens = tokenize("3.14").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Decimal);
         if let TokenValue::Decimal(v) = tokens[0].value {
             assert!((v - 3.14).abs() < 1e-10);
@@ -628,7 +585,7 @@ mod tests {
 
     #[test]
     fn test_scientific_notation() {
-        let tokens = tokenize("1e10", "<test>").unwrap();
+        let tokens = tokenize("1e10").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Decimal);
         if let TokenValue::Decimal(v) = tokens[0].value {
             assert!((v - 1e10).abs() < 1e5);
@@ -639,7 +596,7 @@ mod tests {
 
     #[test]
     fn test_scientific_notation_negative_exponent() {
-        let tokens = tokenize("6.02e-23", "<test>").unwrap();
+        let tokens = tokenize("6.02e-23").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Decimal);
         if let TokenValue::Decimal(v) = tokens[0].value {
             assert!((v - 6.02e-23).abs() < 1e-30);
@@ -650,14 +607,14 @@ mod tests {
 
     #[test]
     fn test_string() {
-        let tokens = tokenize("\"hello\"", "<test>").unwrap();
+        let tokens = tokenize("\"hello\"").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::String);
         assert_eq!(tokens[0].value, TokenValue::String("hello".to_string()));
     }
 
     #[test]
     fn test_string_with_escapes() {
-        let tokens = tokenize("\"hello\\nworld\"", "<test>").unwrap();
+        let tokens = tokenize("\"hello\\nworld\"").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::String);
         assert_eq!(
             tokens[0].value,
@@ -667,7 +624,7 @@ mod tests {
 
     #[test]
     fn test_triple_quoted_string() {
-        let tokens = tokenize("\"\"\"hello\nworld\"\"\"", "<test>").unwrap();
+        let tokens = tokenize("\"\"\"hello\nworld\"\"\"").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::String);
         assert_eq!(
             tokens[0].value,
@@ -677,14 +634,14 @@ mod tests {
 
     #[test]
     fn test_line_comment() {
-        let tokens = tokenize("model # comment\nUser", "<test>").unwrap();
+        let tokens = tokenize("model # comment\nUser").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Model);
         assert_eq!(tokens[1].token_type, TokenType::Identifier);
     }
 
     #[test]
     fn test_block_comment() {
-        let tokens = tokenize("#* doc comment *#", "<test>").unwrap();
+        let tokens = tokenize("#* doc comment *#").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::DocComment);
         assert_eq!(
             tokens[0].value,
@@ -694,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_punctuation() {
-        let tokens = tokenize("{}[]()<>:,.?=|", "<test>").unwrap();
+        let tokens = tokenize("{}[]()<>:,.?=|").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::LBrace);
         assert_eq!(tokens[1].token_type, TokenType::RBrace);
         assert_eq!(tokens[2].token_type, TokenType::LBracket);
@@ -713,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_dotdot() {
-        let tokens = tokenize("1..10", "<test>").unwrap();
+        let tokens = tokenize("1..10").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[1].token_type, TokenType::DotDot);
         assert_eq!(tokens[2].token_type, TokenType::Integer);
@@ -721,7 +678,7 @@ mod tests {
 
     #[test]
     fn test_namespace_newline_significant() {
-        let tokens = tokenize("namespace app.auth\nmodel", "<test>").unwrap();
+        let tokens = tokenize("namespace app.auth\nmodel").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Namespace);
         assert_eq!(tokens[1].token_type, TokenType::Identifier); // app
         assert_eq!(tokens[2].token_type, TokenType::Dot);
@@ -733,7 +690,7 @@ mod tests {
     #[test]
     fn test_import_newline_significant() {
         // Import paths are strings in v2 syntax
-        let tokens = tokenize("import \"./file.arm\"\nmodel", "<test>").unwrap();
+        let tokens = tokenize("import \"./file.arm\"\nmodel").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Import);
         assert_eq!(tokens[1].token_type, TokenType::String);
         assert_eq!(tokens[2].token_type, TokenType::Newline);
@@ -742,7 +699,7 @@ mod tests {
 
     #[test]
     fn test_type_keywords() {
-        let tokens = tokenize("u8 u16 u32 u64 i32 f64 uuid timestamp", "<test>").unwrap();
+        let tokens = tokenize("u8 u16 u32 u64 i32 f64 uuid timestamp").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::U8);
         assert_eq!(tokens[1].token_type, TokenType::U16);
         assert_eq!(tokens[2].token_type, TokenType::U32);
@@ -755,7 +712,7 @@ mod tests {
 
     #[test]
     fn test_unterminated_string_error() {
-        let result = tokenize("\"hello", "<test>");
+        let result = tokenize("\"hello");
         assert!(result.is_err());
         if let Err(LexerError::UnterminatedString { .. }) = result {
             // OK
@@ -766,7 +723,7 @@ mod tests {
 
     #[test]
     fn test_invalid_escape_error() {
-        let result = tokenize("\"hello\\x\"", "<test>");
+        let result = tokenize("\"hello\\x\"");
         assert!(result.is_err());
         if let Err(LexerError::InvalidEscape { ch, .. }) = result {
             assert_eq!(ch, 'x');
@@ -777,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_unexpected_character_error() {
-        let result = tokenize("@", "<test>");
+        let result = tokenize("@");
         assert!(result.is_err());
         if let Err(LexerError::UnexpectedCharacter { ch, .. }) = result {
             assert_eq!(ch, '@');
@@ -788,21 +745,21 @@ mod tests {
 
     #[test]
     fn test_hex_integer() {
-        let tokens = tokenize("0xFF", "<test>").unwrap();
+        let tokens = tokenize("0xFF").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(255));
     }
 
     #[test]
     fn test_hex_integer_lowercase() {
-        let tokens = tokenize("0xdeadbeef", "<test>").unwrap();
+        let tokens = tokenize("0xdeadbeef").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(0xdeadbeef));
     }
 
     #[test]
     fn test_hex_integer_uppercase() {
-        let tokens = tokenize("0xDEADBEEF", "<test>").unwrap();
+        let tokens = tokenize("0xDEADBEEF").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(0xDEADBEEF));
     }
@@ -810,7 +767,7 @@ mod tests {
     #[test]
     fn test_hex_integer_large() {
         // 0x18EEFF00 - used in CAN bus message IDs
-        let tokens = tokenize("0x18EEFF00", "<test>").unwrap();
+        let tokens = tokenize("0x18EEFF00").unwrap();
         assert_eq!(tokens[0].token_type, TokenType::Integer);
         assert_eq!(tokens[0].value, TokenValue::Integer(0x18EEFF00));
     }

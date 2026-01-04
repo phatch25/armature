@@ -78,9 +78,8 @@ fn main() {
 
 fn cmd_tokens(file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let source = std::fs::read_to_string(&file)?;
-    let filename = file.to_string_lossy();
 
-    let tokens = armature::lexer::tokenize(&source, &filename)?;
+    let tokens = armature::lexer::tokenize(&source)?;
 
     for token in &tokens {
         println!("{}", token);
