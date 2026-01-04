@@ -73,6 +73,52 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// Add symbols from this AST to an existing database connection.
+    /// Used when compiling .ac files that import multiple .arm files.
+    pub fn add_to_connection(&self, conn: &Connection, project_id: i64) -> Result<(), CompileError> {
+        // Record this source file
+        conn.execute(
+            "INSERT INTO source_file (project_id, path, kind) VALUES (?, ?, 'arm')",
+            params![project_id, &self.source_file],
+        )?;
+
+        // Insert namespace (or get existing)
+        let namespace_id = self.insert_or_get_namespace(conn, project_id)?;
+
+        // Insert all symbols
+        for symbol in &self.ast.symbols {
+            self.insert_symbol(conn, namespace_id, symbol)?;
+        }
+
+        Ok(())
+    }
+
+    /// Insert namespace or get existing if it already exists.
+    fn insert_or_get_namespace(&self, conn: &Connection, project_id: i64) -> Result<i64, CompileError> {
+        let namespace_name = self.ast.namespace.as_ref()
+            .map(|n| n.name.as_str())
+            .unwrap_or("default");
+
+        // Try to find existing namespace
+        let existing: Result<i64, _> = conn.query_row(
+            "SELECT id FROM namespace WHERE project_id = ? AND name = ?",
+            params![project_id, namespace_name],
+            |row| row.get(0),
+        );
+
+        match existing {
+            Ok(id) => Ok(id),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                conn.execute(
+                    "INSERT INTO namespace (project_id, name) VALUES (?, ?)",
+                    params![project_id, namespace_name],
+                )?;
+                Ok(conn.last_insert_rowid())
+            }
+            Err(e) => Err(CompileError::Database(e)),
+        }
+    }
+
     /// Insert metadata.
     fn insert_meta(&self, conn: &Connection) -> Result<(), CompileError> {
         conn.execute(

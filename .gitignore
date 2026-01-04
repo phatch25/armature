@@ -21,3 +21,10 @@ Thumbs.db
 
 # Session artifacts
 .claude/
+
+# test projects
+tictactoe-test/
+dungeon-test/
+
+# rig CLI (separate repo)
+rig/

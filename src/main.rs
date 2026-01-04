@@ -400,8 +400,99 @@ fn cmd_compile(file: PathBuf, output: PathBuf, allow_warnings: bool) -> Result<(
             }
         }
         armature::parser::ParsedFile::Ac(ac_file) => {
-            // Compile .ac file
+            // Compile .ac file with import resolution
+            let base_dir = file.parent().unwrap_or(std::path::Path::new("."));
+
+            // First compile the .ac project metadata
             armature::compiler::compile_ac(&ac_file, &filename, &output)?;
+
+            // Now process imports
+            let mut total_symbols = 0;
+            let mut symbol_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
+            if !ac_file.imports.is_empty() {
+                // Open the database to add imported symbols
+                let conn = rusqlite::Connection::open(&output)?;
+
+                // Get the project_id (should be 1 since we just created it)
+                let project_id: i64 = conn.query_row(
+                    "SELECT id FROM project LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+
+                for import in &ac_file.imports {
+                    let import_path = base_dir.join(&import.path);
+
+                    if !import_path.exists() {
+                        eprintln!("{}: error: imported file not found: {}", filename, import.path);
+                        std::process::exit(1);
+                    }
+
+                    let import_source = std::fs::read_to_string(&import_path)?;
+                    // Clean up path - strip leading ./ from import path
+                    let clean_import = import.path.strip_prefix("./").unwrap_or(&import.path);
+                    let import_filename = base_dir.join(clean_import).to_string_lossy().to_string();
+
+                    // Parse the imported file
+                    let parsed = armature::parser::parse_file(&import_source, &import_filename)?;
+
+                    match parsed {
+                        armature::parser::ParsedFile::Arm(ast) => {
+                            // Expand clones
+                            let (ast, expansion_errors) = armature::expand::expand_clones(ast);
+                            if !expansion_errors.is_empty() {
+                                for error in &expansion_errors {
+                                    eprintln!("{}: error: {}", import_filename, error);
+                                }
+                                eprintln!("\ncompile: {}: FAILED (clone expansion errors in {})",
+                                    file.display(), import.path);
+                                std::process::exit(1);
+                            }
+
+                            // Analyze
+                            let (symbols, result) = armature::analyzer::analyze(&ast);
+
+                            // Report errors
+                            for error in &result.errors {
+                                eprintln!("{}: error: {}", import_filename, error);
+                            }
+
+                            // Report warnings
+                            for warning in &result.warnings {
+                                eprintln!("{}: {}", import_filename, warning);
+                            }
+
+                            if result.has_errors() {
+                                eprintln!("\ncompile: {}: FAILED (errors in {})",
+                                    file.display(), import.path);
+                                std::process::exit(1);
+                            }
+
+                            if !allow_warnings && !result.warnings.is_empty() {
+                                eprintln!("\ncompile: {}: FAILED (warnings in {}, use --allow-warnings)",
+                                    file.display(), import.path);
+                                std::process::exit(1);
+                            }
+
+                            // Add symbols to database
+                            let compiler = armature::compiler::Compiler::new(&ast, &symbols, &import_filename);
+                            compiler.add_to_connection(&conn, project_id)?;
+
+                            // Track counts
+                            total_symbols += symbols.len();
+                            for (_, info) in symbols.iter() {
+                                *symbol_counts.entry(info.kind.as_str().to_string()).or_insert(0) += 1;
+                            }
+                        }
+                        armature::parser::ParsedFile::Ac(_) => {
+                            eprintln!("{}: error: cannot import .ac file from .ac file: {}",
+                                filename, import.path);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
 
             println!("compile: {} -> {}", file.display(), output.display());
             if let Some(project) = &ac_file.project {
@@ -410,6 +501,13 @@ fn cmd_compile(file: PathBuf, output: PathBuf, allow_warnings: bool) -> Result<(
             println!("  platforms: {}", ac_file.platforms.len());
             println!("  aliases: {}", ac_file.aliases.len());
             println!("  imports: {}", ac_file.imports.len());
+
+            if total_symbols > 0 {
+                println!("  symbols: {}", total_symbols);
+                for (kind, count) in &symbol_counts {
+                    println!("    {}: {}", kind, count);
+                }
+            }
         }
     }
 
