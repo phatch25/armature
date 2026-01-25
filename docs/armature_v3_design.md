@@ -1,12 +1,12 @@
 # Armature 2.0 - Complete Design Specification
 
-**Version:** 2.0-alpha  
+**Version:** 3.0-alpha  
 **Date:** 2026-01-04  
 **Status:** Design Phase - Pre-Implementation
 
 ---
 
-## Executive Summary
+## Summary
 
 Armature is a specification language designed to solve coordination problems in AI-assisted software development. It compiles to a queryable SQLite dependency graph that enables AI agents to work in parallel on unblocked tasks while maintaining consistency.
 
