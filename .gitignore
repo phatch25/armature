@@ -28,3 +28,6 @@ dungeon-test/
 
 # rig CLI (separate repo)
 rig/
+
+# local artifacts
+.armature/
